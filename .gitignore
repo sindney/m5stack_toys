@@ -1,0 +1,46 @@
+# Build output directories
+build/
+*/build/
+
+# Build logs
+build_log.txt
+*.log
+
+# IDE and tool configurations
+.codebuddy/
+.vscode/
+.idea/
+*.code-workspace
+
+# Compiled binaries (can be regenerated)
+*.elf
+*.merged.bin
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Arduino build cache
+.arduino/
+.arduinoIDE/
