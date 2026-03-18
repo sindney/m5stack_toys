@@ -1,41 +1,57 @@
 @echo off
 chcp 65001 >nul
 echo ========================================
-echo   M5Stack 编译上传脚本
-echo   使用 M5Unified 库 (ESP32 SDK 3.x)
+echo   UnitV Camera Viewer - Build ^& Upload
+echo   (M5Stack Core side)
 echo ========================================
 echo.
 
-cd /d %~dp0
+REM ============================================
+REM  Configuration - Modify these as needed
+REM ============================================
+REM Arduino CLI path (default: arduino-cli in PATH)
+set ARDUINO_CLI=arduino-cli
 
-echo [1/2] 编译中... (需要 1-2 分钟)
-C:\Users\xinhou\arduino-cli\arduino-cli.exe compile --fqbn m5stack:esp32:m5stack_core .
+REM Board FQBN (M5Stack Core)
+set FQBN=m5stack:esp32:m5stack_core
+
+REM Serial port for M5Stack upload
+set PORT=COM8
+
+REM Sketch directory
+set SKETCH=%~dp0
+
+REM ============================================
+
+echo [1/2] Compiling...
+%ARDUINO_CLI% compile --fqbn %FQBN% "%SKETCH%"
 
 if %ERRORLEVEL% NEQ 0 (
     echo.
-    echo ✗ 编译失败!
+    echo Compilation failed!
     pause
     exit /b 1
 )
 
 echo.
-echo [2/2] 上传到 COM8...
-C:\Users\xinhou\arduino-cli\arduino-cli.exe upload --fqbn m5stack:esp32:m5stack_core --port COM8 .
+echo [2/2] Uploading to %PORT%...
+%ARDUINO_CLI% upload --fqbn %FQBN% --port %PORT% "%SKETCH%"
 
 if %ERRORLEVEL% NEQ 0 (
     echo.
-    echo ✗ 上传失败!
+    echo Upload failed! Check COM port.
+    echo Try changing PORT variable at the top of this script.
     pause
     exit /b 1
 )
 
 echo.
 echo ========================================
-echo   ✓ 成功! M5Stack 已准备就绪
+echo   Success! M5Stack is ready.
 echo ========================================
 echo.
-echo M5Stack 屏幕状态说明:
-echo   "Waiting for UnitV" = 等待 UnitV 连接
-echo   显示图像           = 接收正常
+echo M5Stack screen status:
+echo   "Waiting for UnitV" = Waiting for UnitV connection
+echo   Showing image       = Receiving normally
 echo.
 pause

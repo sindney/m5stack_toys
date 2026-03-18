@@ -1,12 +1,31 @@
-# 将 boot.py 写入 UnitV 的 flash
+#!/usr/bin/env python3
+"""
+Install boot.py to UnitV flash
+
+Usage:
+    python install_boot_simple.py [PORT]
+
+Examples:
+    python install_boot_simple.py          # Uses default COM9
+    python install_boot_simple.py COM5     # Uses COM5
+    python install_boot_simple.py /dev/ttyUSB0  # Linux
+"""
 
 import serial
 import time
+import sys
 
-PORT = "COM9"
+# ==============================================
+# Configuration
+# ==============================================
+# Default serial port (override with command line argument)
+DEFAULT_PORT = "COM9"
 BAUD = 115200
 
-# boot.py 的内容
+# Get port from command line or use default
+PORT = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_PORT
+
+# boot.py content
 BOOT_CODE = '''
 import sensor
 import image
@@ -116,6 +135,8 @@ while True:
 print("=" * 50)
 print("Installing boot.py to UnitV")
 print("=" * 50)
+print(f"Port: {PORT}")
+print()
 
 try:
     ser = serial.Serial(PORT, BAUD, timeout=2)
@@ -173,6 +194,10 @@ try:
     
     ser.close()
     
+except serial.SerialException as e:
+    print(f"Error: {e}")
+    print(f"Tip: Check if UnitV is connected to {PORT}")
+    print(f"     You can specify a different port: python {sys.argv[0]} COM5")
 except Exception as e:
     print(f"Error: {e}")
     import traceback
