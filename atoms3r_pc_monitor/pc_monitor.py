@@ -5,14 +5,16 @@ PC Monitor - 通过 BLE 发送系统状态到 AtomS3R
 依赖安装:
     pip install bleak psutil nvidia-ml-py
 
+可选 AMD GPU 支持:
+    pip install pyadl
+
 使用方法:
     python pc_monitor.py
 """
 
 import asyncio
-import struct
+import atexit
 import sys
-import time
 from typing import Optional
 
 try:
@@ -27,20 +29,54 @@ except ImportError:
     print("请安装 bleak: pip install bleak")
     sys.exit(1)
 
-# GPU 监控库 - 使用 nvidia-ml-py (替代已废弃的 pynvml 和不兼容 Python 3.12+ 的 GPUtil)
-HAS_NVML = False
+# ─── GPU 后端检测 ───
+# 支持三种后端，按优先级: NVIDIA (pynvml) > AMD (pyadl) > 无 GPU
+GPU_BACKEND = None  # "nvidia" | "amd" | None
+_nvml_handle = None  # NVIDIA: 全局 GPU handle（只 init 一次）
+_amd_device = None   # AMD: 全局 ADL device 对象
+
+# 1) 尝试 NVIDIA
 try:
     import pynvml
     pynvml.nvmlInit()
-    HAS_NVML = True
-    GPU_COUNT = pynvml.nvmlDeviceGetCount()
-    print(f"检测到 {GPU_COUNT} 个 NVIDIA GPU")
-    pynvml.nvmlShutdown()
+    _nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+    gpu_name = pynvml.nvmlDeviceGetName(_nvml_handle)
+    if isinstance(gpu_name, bytes):
+        gpu_name = gpu_name.decode("utf-8")
+    GPU_BACKEND = "nvidia"
+    print(f"GPU 后端: NVIDIA — {gpu_name}")
+
+    # 程序退出时自动 shutdown（只关一次）
+    def _nvml_cleanup():
+        try:
+            pynvml.nvmlShutdown()
+        except Exception:
+            pass
+    atexit.register(_nvml_cleanup)
+
 except ImportError:
-    print("警告: pynvml 未安装，GPU 数据将不可用")
-    print("      pip install nvidia-ml-py")
+    pass
 except Exception as e:
     print(f"警告: NVIDIA GPU 初始化失败: {e}")
+
+# 2) 尝试 AMD (pyadl)
+if GPU_BACKEND is None:
+    try:
+        from pyadl import ADLManager
+        _amd_devices = ADLManager.getInstance().getDevices()
+        if _amd_devices:
+            _amd_device = _amd_devices[0]
+            GPU_BACKEND = "amd"
+            print(f"GPU 后端: AMD — {_amd_device.adapterName}")
+    except ImportError:
+        pass
+    except Exception as e:
+        print(f"警告: AMD GPU 初始化失败: {e}")
+
+if GPU_BACKEND is None:
+    print("警告: 未检测到可用 GPU (支持 NVIDIA / AMD)")
+    print("      NVIDIA: pip install nvidia-ml-py")
+    print("      AMD:    pip install pyadl")
 
 # BLE 配置
 DEVICE_NAME_PREFIX = "AtomS3R-Mon"  # 设备名前缀，用于匹配多台设备
@@ -56,54 +92,42 @@ def get_cpu_percent() -> int:
     return int(psutil.cpu_percent(interval=None))
 
 
-def get_cpu_temp() -> int:
-    """获取 CPU 温度"""
-    try:
-        temps = psutil.sensors_temperatures()
-        if temps:
-            # 尝试常见的温度传感器名称
-            for name in ['coretemp', 'cpu_thermal', 'k10temp', 'zenpower']:
-                if name in temps:
-                    return int(temps[name][0].current)
-            # 返回第一个找到的温度
-            for sensor_name, entries in temps.items():
-                if entries:
-                    return int(entries[0].current)
-    except Exception:
-        pass
-    return 0
-
-
 def get_memory_percent() -> int:
     """获取内存使用率"""
     return int(psutil.virtual_memory().percent)
 
 
 def get_gpu_stats() -> tuple:
-    """获取 GPU 利用率和温度 (支持 NVIDIA GPU)"""
+    """获取 GPU 利用率和温度 (支持 NVIDIA / AMD)
+    
+    返回: (gpu_percent, gpu_temp)
+    """
     gpu_percent = 0
     gpu_temp = 0
-    
-    if HAS_NVML:
+
+    if GPU_BACKEND == "nvidia":
         try:
-            pynvml.nvmlInit()
-            # 获取第一个 GPU (如果有多个可以改为选择特定 GPU)
-            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-            
-            # 获取利用率
-            util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+            util = pynvml.nvmlDeviceGetUtilizationRates(_nvml_handle)
             gpu_percent = util.gpu
-            
-            # 获取温度
-            try:
-                gpu_temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
-            except:
-                pass
-            
-            pynvml.nvmlShutdown()
-        except Exception as e:
+        except Exception:
             pass
-    
+        try:
+            gpu_temp = pynvml.nvmlDeviceGetTemperature(
+                _nvml_handle, pynvml.NVML_TEMPERATURE_GPU
+            )
+        except Exception:
+            pass
+
+    elif GPU_BACKEND == "amd":
+        try:
+            gpu_percent = _amd_device.getCurrentUsage()
+        except Exception:
+            pass
+        try:
+            gpu_temp = _amd_device.getCurrentTemperature()
+        except Exception:
+            pass
+
     return gpu_percent, gpu_temp
 
 
@@ -258,18 +282,14 @@ class PCMonitor:
                     cpu = get_cpu_percent()
                     mem = get_memory_percent()
                     gpu, gpu_temp = get_gpu_stats()
-                    cpu_temp = get_cpu_temp()
+                    cpu_temp = 0  # Windows 上 psutil 无法可靠获取 CPU 温度
                     
                     # 发送
                     success = await self.send_stats(cpu, gpu, mem, gpu_temp, cpu_temp)
                     
                     if success:
                         # 显示状态
-                        status = f"CPU: {cpu:3d}%"
-                        if cpu_temp > 0:
-                            status += f" ({cpu_temp}°C)"
-                        status += f" | MEM: {mem:3d}%"
-                        status += f" | GPU: {gpu:3d}%"
+                        status = f"CPU: {cpu:3d}% | MEM: {mem:3d}% | GPU: {gpu:3d}%"
                         if gpu_temp > 0:
                             status += f" ({gpu_temp}°C)"
                         

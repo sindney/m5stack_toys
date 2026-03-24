@@ -6,7 +6,8 @@ A BLE-based PC hardware monitor display for M5Stack AtomS3R.
 
 - **BLE Connection**: Acts as a BLE server waiting for PC client connection
 - **Real-time Stats**: Displays CPU, GPU, and Memory usage percentages
-- **Temperature Display**: Shows CPU and GPU temperatures
+- **Temperature Display**: Shows GPU temperature
+- **GPU Support**: NVIDIA (via pynvml) and AMD (via pyadl)
 - **History Graph**: Line chart showing usage trends over time
 - **Tech Green UI**: Sci-fi styled green theme interface
 - **Screen Rotation**: Tap button to rotate screen orientation
