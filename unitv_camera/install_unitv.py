@@ -134,67 +134,89 @@ def main():
 
     try:
         ser = serial.Serial(PORT, BAUD, timeout=2)
-        print(f"✓ 已连接 {PORT}")
+        print(f"[OK] Connected {PORT}")
         
-        # 停止当前程序
-        print("  停止当前程序...")
+        # Stop current program with Ctrl-C
+        print("  Stopping current program...")
         ser.write(b'\x03')
-        time.sleep(0.5)
+        time.sleep(1)
         ser.write(b'\x03')
-        time.sleep(0.5)
-        ser.read(ser.in_waiting or 1)
+        time.sleep(1)
+        # Drain buffer
+        if ser.in_waiting:
+            ser.read(ser.in_waiting)
         
-        # 进入 REPL
+        # Enter REPL - send a few newlines
         ser.write(b'\r\n')
-        time.sleep(0.2)
-        ser.read(ser.in_waiting or 1)
+        time.sleep(0.5)
+        ser.write(b'\r\n')
+        time.sleep(0.5)
+        if ser.in_waiting:
+            data = ser.read(ser.in_waiting).decode('utf-8', errors='ignore')
+            print(f"  REPL: {repr(data[-80:])}")
         
-        print("  写入 boot.py...")
+        print("  Writing boot.py...")
         
-        # 写入文件
+        # Open file
         ser.write(b'f = open("boot.py", "w")\r\n')
-        time.sleep(0.1)
+        time.sleep(0.3)
+        if ser.in_waiting:
+            ser.read(ser.in_waiting)
         
-        # 逐行写入
-        for line in BOOT_CODE.strip().split('\n'):
+        # Write lines one by one with delay
+        lines = BOOT_CODE.strip().split('\n')
+        for i, line in enumerate(lines):
             escaped = line.replace('\\', '\\\\').replace('"', '\\"')
             cmd = f'f.write("{escaped}\\n")\r\n'
             ser.write(cmd.encode('utf-8'))
-            time.sleep(0.02)
+            time.sleep(0.05)  # 50ms per line
+            # Drain echo periodically
+            if ser.in_waiting > 256:
+                ser.read(ser.in_waiting)
         
+        # Close file
         ser.write(b'f.close()\r\n')
-        time.sleep(0.2)
+        time.sleep(0.5)
+        if ser.in_waiting:
+            ser.read(ser.in_waiting)
         
-        ser.write(b'print("OK")\r\n')
-        time.sleep(0.3)
+        # Verify
+        ser.write(b'import os; print(os.stat("boot.py"))\r\n')
+        time.sleep(0.5)
+        ser.write(b'print("DONE")\r\n')
+        time.sleep(0.5)
         
-        response = ser.read(ser.in_waiting or 1).decode('utf-8', errors='ignore')
+        response = ""
+        if ser.in_waiting:
+            response = ser.read(ser.in_waiting).decode('utf-8', errors='ignore')
         
-        if "OK" in response or ">>>" in response:
-            print("✓ boot.py 安装成功!")
+        print(f"  Response: {response[-200:]}")
+        
+        if "DONE" in response or ">>>" in response or "stat" in response.lower():
+            print("[OK] boot.py install success!")
             print()
-            print("  启动摄像头流...")
+            print("  Starting camera stream...")
             ser.write(b'exec(open("boot.py").read())\r\n')
             time.sleep(1)
             
             print()
             print("=" * 50)
-            print("  UnitV LED 状态说明:")
-            print("    红色     = 等待 M5Stack")
-            print("    黄色闪烁 = 握手中")
-            print("    绿色闪烁 = 传输中")
+            print("  UnitV LED status:")
+            print("    Red      = Waiting for M5Stack")
+            print("    Yellow   = Handshake")
+            print("    Green    = Streaming")
             print("=" * 50)
         else:
-            print("✗ 安装失败")
+            print("[FAIL] Install failed")
             print(response)
         
         ser.close()
         
     except serial.SerialException as e:
-        print(f"✗ 串口错误: {e}")
-        print(f"  请确认 UnitV 连接到 {PORT}")
+        print(f"[ERR] Serial error: {e}")
+        print(f"  Check UnitV is on {PORT}")
     except Exception as e:
-        print(f"✗ 错误: {e}")
+        print(f"[ERR] Error: {e}")
 
 if __name__ == "__main__":
     main()

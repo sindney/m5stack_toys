@@ -29,7 +29,7 @@ set_led(50, 0, 0)
 # ============ UART 初始化 ============
 fm.register(34, fm.fpioa.UART1_TX, force=True)
 fm.register(35, fm.fpioa.UART1_RX, force=True)
-uart = UART(UART.UART1, 57600, 8, 0, 1, timeout=1000, read_buf_len=4096)
+uart = UART(UART.UART1, 115200, 8, 0, 1, timeout=1000, read_buf_len=4096)
 
 # ============ 摄像头初始化 ============
 sensor.reset()

@@ -20,9 +20,26 @@
 #define PORT_C_RX 16
 #define PORT_C_TX 17
 
+// Port B 引脚 (PIR Unit)
+#define PIR_PIN 36  // Port B 第一引脚 (INPUT)
+
 // 缓冲区
 #define MAX_JPEG_SIZE 20000
 uint8_t jpegBuf[MAX_JPEG_SIZE];
+
+// 用于图像翻转的 Sprite
+M5Canvas imgSprite(&M5.Display);
+
+// ─── 显示模式 ───
+enum DisplayMode {
+    MODE_ALWAYS_ON,    // 模式一：常驻显示，忽略 PIR
+    MODE_PIR_ACTIVE    // 模式二：PIR 有信号才显示，否则黑屏
+};
+DisplayMode displayMode = MODE_ALWAYS_ON;
+bool screenVisible = true;        // 当前画面是否显示
+bool lastPirState = false;        // 上次 PIR 状态
+uint32_t lastPirChangeTime = 0;   // PIR 状态变化时间（防抖）
+#define PIR_DEBOUNCE_MS 200       // PIR 防抖时间
 
 // ─── 赛博朋克调色板 (RGB565) ───
 // 主色调：青色 / 品红 / 深底
@@ -61,6 +78,7 @@ uint8_t jpegBuf[MAX_JPEG_SIZE];
 // ─── 状态机 ───
 enum State {
     STATE_HANDSHAKE,
+    STATE_SYNC,        // 新增：搜索 JPEG 帧头来同步
     STATE_WAIT_HEADER,
     STATE_READ_DATA
 };
@@ -222,6 +240,37 @@ void drawConnectedScreen() {
     drawBottomHUD("STREAM START...", CP_GREEN_DIM);
 }
 
+// 获取当前模式标签
+const char* getModeTag() {
+    switch (displayMode) {
+        case MODE_ALWAYS_ON:  return "M1:ON";
+        case MODE_PIR_ACTIVE: return "M2:PIR";
+    }
+    return "??";
+}
+
+// 黑屏待机画面 (PIR 未触发时)
+void drawBlankScreen() {
+    M5.Display.fillScreen(CP_BG);
+    drawScanlines(0, SCR_H, CP_GRID, 6);
+    
+    drawTopHUD("> STANDBY", getModeTag(), CP_CYAN_DIM);
+    
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(CP_CYAN_DIM);
+    M5.Display.setCursor(100, 112);
+    M5.Display.print("PIR WAITING...");
+    
+    // 小动画点
+    static uint8_t dotAnim = 0;
+    dotAnim = (dotAnim + 1) % 4;
+    for (int i = 0; i < dotAnim; i++) {
+        M5.Display.fillRect(184 + i * 8, 115, 4, 2, CP_MAGENTA);
+    }
+    
+    drawBottomHUD("[A] ALWAYS ON  [B] PIR", CP_MAG_DIM);
+}
+
 // 断线画面
 void drawDisconnectedScreen() {
     M5.Display.fillScreen(CP_BG);
@@ -251,10 +300,14 @@ void drawStreamHUD(float curFps, uint32_t frameSize, uint32_t errors) {
 
     M5.Display.setTextSize(1);
 
-    // 左上：模式
+    // 左上：模式标签
     M5.Display.setTextColor(CP_CYAN);
     M5.Display.setCursor(HUD_MARGIN, 4);
-    M5.Display.print("LIVE");
+    M5.Display.printf("LIVE %s", getModeTag());
+
+    // PIR 指示灯
+    uint16_t pirColor = lastPirState ? CP_GREEN : CP_CYAN_DIM;
+    M5.Display.fillCircle(110, 7, 3, pirColor);
 
     // 右上：FPS
     char buf[32];
@@ -267,7 +320,7 @@ void drawStreamHUD(float curFps, uint32_t frameSize, uint32_t errors) {
     // 小 REC 指示灯 (品红圆点)
     static bool recBlink = false;
     recBlink = !recBlink;
-    M5.Display.fillCircle(38, 7, 3, recBlink ? CP_MAGENTA : CP_MAG_DIM);
+    M5.Display.fillCircle(98, 7, 2, recBlink ? CP_MAGENTA : CP_MAG_DIM);
 
     // ── 底部 HUD ──
     int y0 = SCR_H - HUD_BOT_H;
@@ -280,8 +333,10 @@ void drawStreamHUD(float curFps, uint32_t frameSize, uint32_t errors) {
     snprintf(buf, sizeof(buf), "%uB", frameSize);
     M5.Display.print(buf);
 
-    // 中间：分隔点
-    M5.Display.fillCircle(SCR_W / 2, y0 + 9, 1, CP_CYAN_DIM);
+    // 中间：模式按钮提示
+    M5.Display.setTextColor(CP_MAG_DIM);
+    M5.Display.setCursor(SCR_W / 2 - 54, y0 + 5);
+    M5.Display.print("[A]ON  [B]PIR");
 
     // 右下：错误计数
     if (errors > 0) {
@@ -289,7 +344,7 @@ void drawStreamHUD(float curFps, uint32_t frameSize, uint32_t errors) {
     } else {
         M5.Display.setTextColor(CP_GREEN_DIM);
     }
-    snprintf(buf, sizeof(buf), "ERR:%u", errors);
+    snprintf(buf, sizeof(buf), "E:%u", errors);
     len = strlen(buf);
     M5.Display.setCursor(SCR_W - len * 6 - HUD_MARGIN, y0 + 5);
     M5.Display.print(buf);
@@ -314,6 +369,14 @@ void setup() {
     
     Serial.printf("UART2: %d baud on G%d(RX)/G%d(TX)\n", UNITV_BAUD, PORT_C_RX, PORT_C_TX);
 
+    // 初始化 PIR (Port B)
+    pinMode(PIR_PIN, INPUT);
+    Serial.printf("PIR on G%d (Port B)\n", PIR_PIN);
+
+    // 初始化图像翻转 Sprite (160x120, RGB565)
+    imgSprite.createSprite(IMG_W, IMG_H);
+    imgSprite.setColorDepth(16);
+
     // ── 绘制启动画面 ──
     drawBootScreen();
     delay(500);
@@ -335,13 +398,32 @@ void setup() {
 bool doHandshake() {
     static char rxBuf[64];
     static int rxPos = 0;
+    static bool sentStop = false;
     
     uint32_t now = millis();
     
-    // 每 500ms 发送一次 M5_READY
+    // 每 500ms 发送一次握手信号
     if (now - lastHandshakeTime > 500) {
+        // 先发 STOP 让 UnitV 停止可能正在进行的数据流
+        if (!sentStop) {
+            UNITV_SERIAL.print("STOP\n");
+            delay(100);
+            // 清空所有缓冲数据（丢弃 JPEG 流）
+            while (UNITV_SERIAL.available()) UNITV_SERIAL.read();
+            delay(100);
+            while (UNITV_SERIAL.available()) UNITV_SERIAL.read();
+            sentStop = true;
+            Serial.println("Sent: STOP (clear stream)");
+            lastHandshakeTime = now;
+            return false;
+        }
+        
+        // 同时发 M5_READY 和 START，覆盖 UnitV 的两种等待状态
+        // UnitV 可能在：1) 握手等待（等 M5_READY）2) STOP 后等 START
         UNITV_SERIAL.print("M5_READY\n");
-        Serial.println("Sent: M5_READY");
+        delay(20);
+        UNITV_SERIAL.print("START\n");
+        Serial.println("Sent: M5_READY + START");
         lastHandshakeTime = now;
         
         // 闪烁 "Searching" 光标
@@ -355,9 +437,46 @@ bool doHandshake() {
         drawCursorBlink(162, 160, CP_MAGENTA, blink);
     }
     
-    // 检查是否收到 UNITV_OK
+    // 检查是否收到 UNITV_OK 或 JPEG 数据流
     while (UNITV_SERIAL.available()) {
         char c = UNITV_SERIAL.read();
+        
+        // 检测到可能的 JPEG 帧头（4字节长度头，高位通常为 0x00）
+        // 如果收到的是二进制数据，说明 UnitV 已经在发帧了
+        if ((uint8_t)c == 0x00 && UNITV_SERIAL.available() >= 3) {
+            // 可能是 4 字节长度头的开头，读取后续字节
+            uint8_t h1 = UNITV_SERIAL.read();
+            uint8_t h2 = UNITV_SERIAL.read();
+            uint8_t h3 = UNITV_SERIAL.read();
+            uint32_t potentialLen = ((uint32_t)(uint8_t)c << 24) | 
+                                    ((uint32_t)h1 << 16) | 
+                                    ((uint32_t)h2 << 8) | h3;
+            if (potentialLen > 100 && potentialLen < MAX_JPEG_SIZE) {
+                // 这看起来是有效的 JPEG 帧长度，UnitV 已经在发帧了！
+                Serial.printf("Detected frame stream (len=%u), connecting directly!\n", potentialLen);
+                drawConnectedScreen();
+                delay(200);
+                // 把这4字节放回去（不能 unread，所以我们在 loop 里处理）
+                // 清空当前帧数据然后等下一帧
+                uint32_t toSkip = potentialLen;
+                while (toSkip > 0 && UNITV_SERIAL.available()) {
+                    size_t chunk = min((size_t)UNITV_SERIAL.available(), (size_t)min(toSkip, (uint32_t)256));
+                    for (size_t i = 0; i < chunk; i++) UNITV_SERIAL.read();
+                    toSkip -= chunk;
+                    if (toSkip > 0) delay(10);
+                }
+                rxPos = 0;
+                sentStop = false;
+                return true;
+            }
+        }
+        
+        // 过滤非 ASCII 可打印字符（忽略其他二进制数据）
+        if (c < 0x20 && c != '\n' && c != '\r') {
+            rxPos = 0;
+            continue;
+        }
+        
         if (c == '\n' || c == '\r') {
             if (rxPos > 0) {
                 rxBuf[rxPos] = '\0';
@@ -370,6 +489,10 @@ bool doHandshake() {
                     drawConnectedScreen();
                     delay(300);
                     
+                    // 清空残留数据
+                    while (UNITV_SERIAL.available()) UNITV_SERIAL.read();
+                    delay(100);
+                    
                     // 发送 START 命令
                     UNITV_SERIAL.print("START\n");
                     delay(100);
@@ -378,15 +501,20 @@ bool doHandshake() {
                     Serial.println("Sent: START");
                     
                     // 清空缓冲，准备接收图像
+                    delay(200);
                     while (UNITV_SERIAL.available()) UNITV_SERIAL.read();
                     
                     rxPos = 0;
+                    sentStop = false;
                     return true;
                 }
                 rxPos = 0;
             }
         } else if (rxPos < 63) {
             rxBuf[rxPos++] = c;
+        } else {
+            // Buffer overflow - likely garbage data, reset
+            rxPos = 0;
         }
     }
     
@@ -398,36 +526,73 @@ bool doHandshake() {
 void loop() {
     M5.update();
     
-    // 按钮 B: 重置/重新握手
+    // ── 读取 PIR ──
+    bool pirActive = digitalRead(PIR_PIN) == HIGH;
+    
+    // PIR 防抖
+    if (pirActive != lastPirState && millis() - lastPirChangeTime > PIR_DEBOUNCE_MS) {
+        lastPirChangeTime = millis();
+        lastPirState = pirActive;
+    }
+    
+    // ── 按钮切换模式 ──
+    if (M5.BtnA.wasPressed()) {
+        displayMode = MODE_ALWAYS_ON;
+        screenVisible = true;
+        Serial.println("Mode: ALWAYS ON");
+        // 如果在黑屏状态需要重绘
+        if (unitvReady) {
+            M5.Display.fillScreen(CP_BG);
+            drawStreamHUD(fps, 0, errorCount);
+        }
+    }
     if (M5.BtnB.wasPressed()) {
-        Serial.println("Reset requested");
-        currentState = STATE_HANDSHAKE;
-        unitvReady = false;
-        frameCount = 0;
-        errorCount = 0;
+        displayMode = MODE_PIR_ACTIVE;
+        screenVisible = pirActive;  // 立即根据当前 PIR 状态决定
+        Serial.println("Mode: PIR ACTIVE");
+        if (!screenVisible && unitvReady) {
+            drawBlankScreen();
+        } else if (screenVisible && unitvReady) {
+            M5.Display.fillScreen(CP_BG);
+            drawStreamHUD(fps, 0, errorCount);
+        }
+    }
+    
+    // ── PIR 逻辑控制显隐 ──
+    if (unitvReady) {
+        bool newVisible = screenVisible;
         
-        // 发送停止命令
-        UNITV_SERIAL.print("STOP\n");
-        delay(100);
+        switch (displayMode) {
+            case MODE_ALWAYS_ON:
+                newVisible = true;
+                break;
+            case MODE_PIR_ACTIVE:
+                newVisible = pirActive;
+                break;
+        }
         
-        // 清空缓冲
-        while (UNITV_SERIAL.available()) UNITV_SERIAL.read();
-        
-        drawWaitingScreen();
-        lastHandshakeTime = millis();
+        // 显隐状态变化时重绘
+        if (newVisible != screenVisible) {
+            screenVisible = newVisible;
+            if (screenVisible) {
+                M5.Display.fillScreen(CP_BG);
+                drawStreamHUD(fps, 0, errorCount);
+            } else {
+                drawBlankScreen();
+            }
+        }
     }
     
     // 握手阶段
     if (currentState == STATE_HANDSHAKE) {
         if (doHandshake()) {
             unitvReady = true;
-            currentState = STATE_WAIT_HEADER;
+            currentState = STATE_SYNC;  // 先进入同步模式
             lastFpsTime = millis();
             
             M5.Display.fillScreen(CP_BG);
-            // 绘制初始 HUD 框架
             drawStreamHUD(0, 0, 0);
-            Serial.println("Handshake complete, waiting for frames...");
+            Serial.println("Handshake complete, syncing...");
         }
         return;
     }
@@ -439,13 +604,13 @@ void loop() {
     static uint8_t header[4];
     static uint32_t lastDataTime = millis();
     
-    // 超时检测 - 5秒无数据重新握手
-    if (millis() - lastDataTime > 5000) {
+    // 超时检测 - 8秒无数据重新握手
+    if (millis() - lastDataTime > 8000) {
         Serial.println("Timeout! Restarting handshake...");
         currentState = STATE_HANDSHAKE;
         unitvReady = false;
         lastHandshakeTime = millis();
-        
+        headerBytes = 0;
         drawDisconnectedScreen();
         return;
     }
@@ -453,6 +618,52 @@ void loop() {
     while (UNITV_SERIAL.available()) {
         lastDataTime = millis();
         
+        // ── SYNC 模式：丢弃数据直到找到 4 字节长度头 + JPEG 头 ──
+        if (currentState == STATE_SYNC) {
+            // 逐字节读取，寻找合理的 4 字节长度头
+            // 策略：读 4 字节，检查是否为合理长度，然后检查后续 2 字节是否为 FF D8
+            uint8_t b = UNITV_SERIAL.read();
+            header[headerBytes++] = b;
+            
+            if (headerBytes >= 4) {
+                uint32_t len = ((uint32_t)header[0] << 24) | 
+                               ((uint32_t)header[1] << 16) | 
+                               ((uint32_t)header[2] << 8) | 
+                               header[3];
+                
+                // 合理的 JPEG 大小: 200 ~ 20000 字节
+                if (len >= 200 && len < MAX_JPEG_SIZE) {
+                    // 等一下看看后续2字节是不是 FF D8 (JPEG SOI)
+                    uint32_t waitStart = millis();
+                    while (UNITV_SERIAL.available() < 2 && millis() - waitStart < 200) {
+                        delay(1);
+                    }
+                    if (UNITV_SERIAL.available() >= 2) {
+                        uint8_t j0 = UNITV_SERIAL.read();
+                        uint8_t j1 = UNITV_SERIAL.read();
+                        if (j0 == 0xFF && j1 == 0xD8) {
+                            // 找到了！这是有效的帧头
+                            Serial.printf("[SYNC] Found frame! len=%u\n", len);
+                            expectedLen = len;
+                            receivedLen = 2;
+                            jpegBuf[0] = 0xFF;
+                            jpegBuf[1] = 0xD8;
+                            currentState = STATE_READ_DATA;
+                            headerBytes = 0;
+                            continue;
+                        }
+                    }
+                }
+                // 没匹配，移位继续找
+                header[0] = header[1];
+                header[1] = header[2];
+                header[2] = header[3];
+                headerBytes = 3;
+            }
+            continue;
+        }
+        
+        // ── 等待帧头 ──
         if (currentState == STATE_WAIT_HEADER) {
             header[headerBytes++] = UNITV_SERIAL.read();
             
@@ -465,11 +676,12 @@ void loop() {
                 if (expectedLen > 0 && expectedLen < MAX_JPEG_SIZE) {
                     currentState = STATE_READ_DATA;
                     receivedLen = 0;
+                    headerBytes = 0;
                 } else {
                     Serial.printf("Invalid length: %u, resync...\n", expectedLen);
                     errorCount++;
-                    
-                    // 尝试重新同步：移位查找
+                    // 回到 SYNC 模式重新对齐
+                    currentState = STATE_SYNC;
                     header[0] = header[1];
                     header[1] = header[2];
                     header[2] = header[3];
@@ -489,20 +701,29 @@ void loop() {
             if (receivedLen >= expectedLen) {
                 // 验证 JPEG
                 if (jpegBuf[0] == 0xFF && jpegBuf[1] == 0xD8) {
-                    // 显示图像 (居中到 HUD 区域之间)
-                    M5.Display.drawJpg(jpegBuf, expectedLen, IMG_X, IMG_Y);
                     frameCount++;
                     
-                    // 每秒更新 FPS 计算
-                    uint32_t now = millis();
-                    if (now - lastFpsTime >= 1000) {
-                        fps = frameCount * 1000.0 / (now - lastFpsTime);
-                        lastFpsTime = now;
-                        frameCount = 0;
-                    }
+                    // 只在画面可见时显示图像
+                    if (screenVisible) {
+                        // JPEG 解码到 Sprite，再翻转 Y 轴绘制
+                        imgSprite.drawJpg(jpegBuf, expectedLen, 0, 0);
+                        // pushRotateZoom: 目标中心点, 旋转角度, scaleX, scaleY
+                        // scaleX=-1, scaleY=-1 实现 180° 翻转（上下+左右）
+                        imgSprite.pushRotateZoom(&M5.Display,
+                            IMG_X + IMG_W / 2, IMG_Y + IMG_H / 2,
+                            0, -1.0, -1.0);
                     
-                    // 每帧都重绘 HUD (防止被图像遮挡)
-                    drawStreamHUD(fps, expectedLen, errorCount);
+                        // 每秒更新 FPS 计算
+                        uint32_t now = millis();
+                        if (now - lastFpsTime >= 1000) {
+                            fps = frameCount * 1000.0 / (now - lastFpsTime);
+                            lastFpsTime = now;
+                            frameCount = 0;
+                        }
+                    
+                        // 每帧都重绘 HUD (防止被图像遮挡)
+                        drawStreamHUD(fps, expectedLen, errorCount);
+                    }
                 } else {
                     Serial.printf("Invalid JPEG: %02X %02X\n", jpegBuf[0], jpegBuf[1]);
                     errorCount++;

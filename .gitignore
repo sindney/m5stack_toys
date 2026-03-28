@@ -8,6 +8,7 @@ build_log.txt
 
 # IDE and tool configurations
 .codebuddy/
+.workbuddy/
 .vscode/
 .idea/
 *.code-workspace
@@ -15,6 +16,12 @@ build_log.txt
 # Compiled binaries (can be regenerated)
 *.elf
 *.merged.bin
+
+# Firmware binaries (can be re-downloaded)
+maixpy_firmware.bin
+maixpy_minimum.bin
+maixpy_unitv.bin
+*.kfpkg
 
 # Python cache
 __pycache__/
