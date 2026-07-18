@@ -14,8 +14,13 @@
 namespace shell {
 
 // Bind the static app registry and bring up the launcher. Call once from
-// setup() after theme::init().
-void begin(App** apps, size_t count);
+// setup() after theme::init(). Pass a bootApp to skip the launcher at
+// power-on and enter that app directly; nullptr boots into the launcher.
+void begin(App** apps, size_t count, App* bootApp = nullptr);
+
+// Enter an app from the launcher: focuses its card (so exiting returns
+// there) and calls its onEnter(). No-op while another app is active.
+void enterApp(App* app);
 
 // Drive one frame of the shell + active app. Call from loop().
 void tick();

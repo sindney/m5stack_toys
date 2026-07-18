@@ -4,7 +4,7 @@ Four-app launcher firmware for the [M5Stack StopWatch (C152)](https://docs.m5sta
 
 ## What you get
 
-A single Arduino sketch that boots into a card launcher and dispatches to **Stopwatch**, **Balance**, **Badge**, and **USB Drive**. Clicking KeyA / KeyB cycles apps and triggers in-app actions; a screen tap (or pressing A+B together) enters the focused app; pressing A+B inside an app pops back to the launcher.
+A single Arduino sketch that boots straight into the **Badge** app (change `g_bootApp` in `stopwatch_multiverse.ino` to pick another app or the launcher) and dispatches to **Stopwatch**, **Balance**, **Badge**, and **USB Drive**. Clicking KeyA / KeyB cycles apps and triggers in-app actions; a screen tap (or pressing A+B together) enters the focused app; pressing A+B inside an app pops back to the launcher.
 
 | App       | What it does                                                                |
 | --------- | --------------------------------------------------------------------------- |

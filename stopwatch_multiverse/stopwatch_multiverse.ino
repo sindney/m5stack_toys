@@ -1,7 +1,9 @@
 // stopwatch_multiverse.ino
 // Four-app launcher firmware for the M5Stack StopWatch (C152).
 //
-// Apps shipped: Stopwatch, Balance, Badge, USB Drive.
+// Apps shipped: Stopwatch, Balance, Badge, USB Drive. Power-on goes
+// straight into the app named by g_bootApp below (Badge by default);
+// A+B still exits it to the launcher as usual.
 // Inputs: click KEYA / KEYB for nav + actions (release within 500 ms);
 //         tap to enter; press KEYA+KEYB together to exit any app back
 //         to the launcher (or to enter the focused app from it).
@@ -38,6 +40,11 @@ static App* g_apps[] = {
     &g_usb,
 };
 
+// Boot straight into this app on power-on, bypassing the launcher.
+// One-line switch: point at any instance above (&g_stopwatch, ...),
+// or nullptr to boot into the launcher instead.
+static App* g_bootApp = &g_badge;
+
 void setup() {
     auto cfg = M5.config();
     cfg.internal_imu = true;     // matches the official sample
@@ -64,7 +71,7 @@ void setup() {
     // it. Must run before shell::begin so the boot log is visible.
     usbdrive::begin();
 
-    shell::begin(g_apps, sizeof(g_apps) / sizeof(g_apps[0]));
+    shell::begin(g_apps, sizeof(g_apps) / sizeof(g_apps[0]), g_bootApp);
 }
 
 void loop() {

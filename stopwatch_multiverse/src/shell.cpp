@@ -39,14 +39,31 @@ static void drawLauncher();
 static int  clampFocus(int idx);
 static bool pointInsideBezel(int x, int y);
 
-void begin(App** apps, size_t count) {
+void begin(App** apps, size_t count, App* bootApp) {
     g_apps = apps;
     g_appCount = count;
     g_focus = 0;
     g_active = nullptr;
     s_touchActive = false;
+    if (bootApp) {
+        // Straight into the boot app — no launcher frame flashes by.
+        enterApp(bootApp);
+        return;
+    }
     drawLauncher();
     theme::present();
+}
+
+void enterApp(App* app) {
+    if (!app || g_active) return;
+    for (size_t i = 0; i < g_appCount; ++i) {
+        if (g_apps[i] == app) {
+            g_focus = static_cast<int>(i);
+            break;
+        }
+    }
+    g_active = app;
+    g_active->onEnter();
 }
 
 bool inApp() { return g_active != nullptr; }
@@ -106,8 +123,7 @@ void pushEvent(const input::Event& ev) {
 
             if (!g_active) {
                 if (g_appCount == 0) return;
-                g_active = g_apps[g_focus];
-                g_active->onEnter();
+                enterApp(g_apps[g_focus]);
             } else {
                 input::Event tap = ev;
                 tap.kind = input::EventKind::TouchDown;
@@ -227,8 +243,7 @@ void pumpM5() {
         if (g_active) {
             popToLauncher();
         } else if (g_appCount > 0) {
-            g_active = g_apps[g_focus];
-            g_active->onEnter();
+            enterApp(g_apps[g_focus]);
         }
     }
     if (!M5.BtnA.isPressed() && !M5.BtnB.isPressed()) {
