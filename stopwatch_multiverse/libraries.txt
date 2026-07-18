@@ -1,0 +1,17 @@
+# Vendored M5Stack libraries for stopwatch_multiverse
+#
+# The following libraries are already vendored at the parent directory
+# (D:\Dev\). They are installed into the Arduino-CLI sketchbook by
+# `scripts/flash.sh` via `arduino-cli lib install` (which uses the
+# Arduino Library Manager index, not the local copy directly).
+#
+# Local checkout mirrors are kept under D:\Dev\ for offline development;
+# flash.sh prefers the local copies when --offline is passed.
+#
+# M5PM1 is intentionally NOT listed — M5Unified manages the battery PMU
+# internally and the audio apps that needed it (VoiceToy) have been
+# dropped from this firmware.
+
+M5Unified
+M5GFX
+M5IOE1

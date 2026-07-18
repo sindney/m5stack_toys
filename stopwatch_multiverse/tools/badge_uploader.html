@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<!--
+  badge_uploader.html — host-side badge image tool for the M5Stack StopWatch.
+
+  Zero install: open this file in Chrome/Edge. The watch presents its badge
+  partition as a USB drive (open the USB DRIVE app on the watch first);
+  this page composites an image onto the watch's 466x466 circular face,
+  encodes RGB565 little-endian, and writes slot_XX.bin straight onto the
+  drive via the File System Access API. Browsers without that API get a
+  "Download .bin" fallback for manual drag-and-drop.
+
+  On-disk format: /badge/slot_XX.bin on the device == <drive>/SLOT_XX.BIN
+  here. Exactly 466*466*2 = 434312 bytes, RGB565 LE, circle-masked with a
+  1.5 px feathered edge, alpha premultiplied against black.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>StopWatch Badge Uploader</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { --bg:#050a06; --panel:#0a140c; --line:#123a1e; --hi:#00e070;
+          --lo:#00a050; --dim:#035020; --amber:#ffb000; --red:#ff3040; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:24px; background:var(--bg); color:var(--hi);
+         font:14px/1.45 ui-monospace, Consolas, monospace; }
+  h1 { font-size:18px; margin:0 0 4px; letter-spacing:2px; }
+  h1 .sub { color:var(--lo); font-size:12px; letter-spacing:0; }
+  .row { display:flex; gap:24px; flex-wrap:wrap; align-items:flex-start; }
+  .card { background:var(--panel); border:1px solid var(--line);
+          padding:16px; border-radius:4px; }
+  canvas#face { width:320px; height:320px; cursor:grab;
+                image-rendering:pixelated; touch-action:none; }
+  canvas#face.drag { cursor:grabbing; }
+  label { color:var(--lo); display:block; margin:10px 0 4px; }
+  input[type=range] { width:100%; accent-color:var(--hi); }
+  button { background:#031207; color:var(--hi); border:1px solid var(--lo);
+           padding:8px 12px; font:inherit; cursor:pointer; border-radius:3px; }
+  button:hover:not(:disabled) { background:#0a2410; }
+  button:disabled { opacity:.35; cursor:default; }
+  button.danger { color:var(--red); border-color:#5a1020; }
+  #slots { display:grid; grid-template-columns:repeat(4,1fr); gap:6px;
+           margin:10px 0; }
+  #slots button { position:relative; padding:8px 0; }
+  #slots button.sel { outline:2px solid var(--hi); }
+  #slots button .dot { position:absolute; top:3px; right:4px; width:7px;
+           height:7px; border-radius:50%; background:var(--dim); }
+  #slots button.used .dot { background:var(--hi); }
+  #status { margin-top:12px; min-height:1.4em; color:var(--amber); }
+  #status.ok { color:var(--hi); }
+  #status.err { color:var(--red); }
+  #dropHint { border:1px dashed var(--dim); padding:10px; text-align:center;
+              color:var(--lo); margin-bottom:10px; border-radius:3px; }
+  .btnrow { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
+  .steps { color:var(--lo); font-size:12px; margin-top:14px; max-width:340px; }
+  .steps b { color:var(--hi); }
+</style>
+</head>
+<body>
+<h1>STOPWATCH BADGE UPLOADER <span class="sub">// 466&times;466 RGB565 over USB drive</span></h1>
+
+<div class="row">
+  <div class="card">
+    <div id="dropHint">drop an image here, or
+      <input type="file" id="filePick" accept="image/*" style="width:auto">
+    </div>
+    <canvas id="face" width="466" height="466"></canvas>
+    <label>zoom <span id="zoomVal">1.00</span>&times;</label>
+    <input type="range" id="zoom" min="0.2" max="5" step="0.01" value="1">
+    <div class="steps">
+      <b>On the watch:</b> open the <b>USB DRIVE</b> app (4th tile) &rarr;
+      the <b>BADGE</b> drive appears on this PC.<br>
+      <b>Here:</b> connect the drive, drop an image, drag to pan, wheel to
+      zoom, pick a slot, write.<br>
+      <b>Then:</b> eject the drive in Windows, exit the app on the watch
+      (hold A+B), open <b>BADGE</b>.
+    </div>
+  </div>
+
+  <div class="card" style="min-width:280px">
+    <div class="btnrow">
+      <button id="connect">1 · Connect badge drive</button>
+      <span id="driveName" style="align-self:center;color:var(--lo)"></span>
+    </div>
+    <label>target slot</label>
+    <div id="slots"></div>
+    <div class="btnrow">
+      <button id="write" disabled>2 · Write to slot</button>
+      <button id="erase" class="danger" disabled>Erase slot</button>
+      <button id="download" disabled>Download .bin</button>
+    </div>
+    <div id="status"></div>
+  </div>
+</div>
+
+<script>
+'use strict';
+
+const W = 466, R = W >> 1, FEATHER = 1.5;
+const IMG_SIZE = W * W * 2;          // 434312
+const MAX_SLOTS = 16;
+
+const $ = id => document.getElementById(id);
+const face = $('face'), fctx = face.getContext('2d', { willReadFrequently: true });
+
+// Feathered circular mask, built once. Alpha 255 up to R-FEATHER, then a
+// linear ramp to 0 at R — matches the old host encoder's edge.
+const mask = document.createElement('canvas');
+mask.width = mask.height = W;
+{
+  const m = mask.getContext('2d');
+  const g = m.createRadialGradient(R, R, R - FEATHER, R, R, R);
+  g.addColorStop(0, 'rgba(255,255,255,1)');
+  g.addColorStop(1, 'rgba(255,255,255,0)');
+  m.fillStyle = g;
+  m.fillRect(0, 0, W, W);
+}
+const work = document.createElement('canvas');
+work.width = work.height = W;
+const wctx = work.getContext('2d');
+// Encode target: work (masked image) composited over black WITHOUT the
+// bezel guide ring that decorates the visible canvas.
+const enc = document.createElement('canvas');
+enc.width = enc.height = W;
+const ectx = enc.getContext('2d', { willReadFrequently: true });
+
+const state = {
+  img: null,          // HTMLImageElement
+  panX: 0, panY: 0,   // canvas px
+  zoom: 1,
+  dir: null,          // FileSystemDirectoryHandle
+  slot: 0,
+  used: new Array(MAX_SLOTS).fill(false),
+};
+
+// ---------------------------------------------------------------- render
+
+function render() {
+  wctx.globalCompositeOperation = 'source-over';
+  wctx.clearRect(0, 0, W, W);
+  if (state.img) {
+    const iw = state.img.naturalWidth, ih = state.img.naturalHeight;
+    const fit = Math.min(W / iw, W / ih);
+    const sw = Math.max(1, Math.round(iw * fit * state.zoom));
+    const sh = Math.max(1, Math.round(ih * fit * state.zoom));
+    const px = ((W - sw) >> 1) + Math.round(state.panX);
+    const py = ((W - sh) >> 1) + Math.round(state.panY);
+    wctx.imageSmoothingQuality = 'high';
+    wctx.drawImage(state.img, px, py, sw, sh);
+    wctx.globalCompositeOperation = 'destination-in';
+    wctx.drawImage(mask, 0, 0);
+  }
+  // Composite against black: semi-transparent feather darkens exactly
+  // like the watch's alpha-premultiply did.
+  fctx.globalCompositeOperation = 'source-over';
+  fctx.fillStyle = '#000';
+  fctx.fillRect(0, 0, W, W);
+  fctx.drawImage(work, 0, 0);
+  // bezel guide
+  fctx.strokeStyle = 'rgba(0,224,112,.25)';
+  fctx.beginPath(); fctx.arc(R, R, R - 0.5, 0, Math.PI * 2); fctx.stroke();
+  if (!state.img) {
+    fctx.fillStyle = '#035020';
+    fctx.font = '16px monospace';
+    fctx.textAlign = 'center';
+    fctx.fillText('no image', R, R);
+  }
+}
+
+function encode() {
+  ectx.fillStyle = '#000';
+  ectx.fillRect(0, 0, W, W);
+  ectx.drawImage(work, 0, 0);
+  const px = ectx.getImageData(0, 0, W, W).data;
+  const out = new Uint8Array(IMG_SIZE);
+  for (let i = 0, j = 0; j < IMG_SIZE; i += 4, j += 2) {
+    const v = ((px[i] >> 3) << 11) | ((px[i + 1] >> 2) << 5) | (px[i + 2] >> 3);
+    out[j] = v & 0xFF;
+    out[j + 1] = (v >> 8) & 0xFF;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------- image in
+
+function loadImageFile(file) {
+  if (!file || !file.type.startsWith('image/')) return;
+  const url = URL.createObjectURL(file);
+  const img = new Image();
+  img.onload = () => {
+    URL.revokeObjectURL(url);
+    state.img = img;
+    state.panX = state.panY = 0;
+    $('download').disabled = false;
+    refreshWriteBtn();
+    render();
+    setStatus('image loaded — drag to pan, wheel to zoom', 'ok');
+  };
+  img.onerror = () => setStatus('could not decode that image', 'err');
+  img.src = url;
+}
+
+$('filePick').addEventListener('change', e => loadImageFile(e.target.files[0]));
+window.addEventListener('dragover', e => e.preventDefault());
+window.addEventListener('drop', e => {
+  e.preventDefault();
+  loadImageFile(e.dataTransfer.files[0]);
+});
+
+// pan / zoom
+let dragging = false, lastX = 0, lastY = 0;
+face.addEventListener('pointerdown', e => {
+  dragging = true; lastX = e.clientX; lastY = e.clientY;
+  face.classList.add('drag'); face.setPointerCapture(e.pointerId);
+});
+face.addEventListener('pointermove', e => {
+  if (!dragging) return;
+  const k = W / face.clientWidth;          // CSS px -> canvas px
+  state.panX += (e.clientX - lastX) * k;
+  state.panY += (e.clientY - lastY) * k;
+  lastX = e.clientX; lastY = e.clientY;
+  render();
+});
+face.addEventListener('pointerup', () => { dragging = false; face.classList.remove('drag'); });
+face.addEventListener('wheel', e => {
+  e.preventDefault();
+  setZoom(state.zoom * (e.deltaY < 0 ? 1.08 : 1 / 1.08));
+}, { passive: false });
+
+function setZoom(z) {
+  state.zoom = Math.min(5, Math.max(0.2, z));
+  $('zoom').value = state.zoom;
+  $('zoomVal').textContent = state.zoom.toFixed(2);
+  render();
+}
+$('zoom').addEventListener('input', e => setZoom(parseFloat(e.target.value)));
+
+// ---------------------------------------------------------------- slots UI
+
+const slotsEl = $('slots');
+for (let i = 0; i < MAX_SLOTS; i++) {
+  const b = document.createElement('button');
+  b.innerHTML = `${i}<span class="dot"></span>`;
+  b.addEventListener('click', () => { state.slot = i; drawSlots(); refreshWriteBtn(); });
+  slotsEl.appendChild(b);
+}
+function drawSlots() {
+  [...slotsEl.children].forEach((b, i) => {
+    b.classList.toggle('sel', i === state.slot);
+    b.classList.toggle('used', state.used[i]);
+  });
+}
+const slotName = i => `slot_${String(i).padStart(2, '0')}.bin`;
+
+// ---------------------------------------------------------------- drive I/O
+
+const hasFS = 'showDirectoryPicker' in window;
+if (!hasFS) {
+  $('connect').disabled = true;
+  setStatus('this browser has no File System Access API — use Download .bin + drag-and-drop', 'err');
+}
+
+$('connect').addEventListener('click', async () => {
+  try {
+    let dir = await showDirectoryPicker({ id: 'badge', mode: 'readwrite' });
+    // Defensive: if the user picked a parent that contains a "badge"
+    // folder, descend into it. The real drive has files at its root.
+    try { dir = await dir.getDirectoryHandle('badge'); } catch (_) { /* root is fine */ }
+    state.dir = dir;
+    $('driveName').textContent = dir.name;
+    await refreshSlots();
+    setStatus('drive connected', 'ok');
+  } catch (e) {
+    if (e.name !== 'AbortError') setStatus('connect failed: ' + e.message, 'err');
+  }
+});
+
+async function refreshSlots() {
+  state.used.fill(false);
+  if (state.dir) {
+    for await (const [name, h] of state.dir.entries()) {
+      const m = /^slot_(\d\d)\.bin$/i.exec(name);
+      if (!m || h.kind !== 'file') continue;
+      const i = parseInt(m[1], 10);
+      if (i < 0 || i >= MAX_SLOTS) continue;
+      const f = await h.getFile();
+      state.used[i] = (f.size === IMG_SIZE);
+    }
+  }
+  drawSlots();
+  refreshWriteBtn();
+}
+
+function refreshWriteBtn() {
+  $('write').disabled = !(state.dir && state.img);
+  $('erase').disabled = !(state.dir && state.used[state.slot]);
+}
+
+$('write').addEventListener('click', async () => {
+  const i = state.slot;
+  try {
+    const bytes = encode();
+    if (bytes.length !== IMG_SIZE) throw new Error(`internal: ${bytes.length} bytes`);
+    setStatus(`writing ${slotName(i)} (${IMG_SIZE} bytes)…`);
+    const fh = await state.dir.getFileHandle(slotName(i), { create: true });
+    const w = await fh.createWritable();
+    await w.write(bytes);
+    await w.close();
+    await refreshSlots();
+    setStatus(`wrote ${slotName(i)} — eject the drive, exit the watch app, open BADGE`, 'ok');
+  } catch (e) {
+    setStatus('write failed: ' + e.message, 'err');
+  }
+});
+
+$('erase').addEventListener('click', async () => {
+  const i = state.slot;
+  try {
+    await state.dir.removeEntry(slotName(i));
+    await refreshSlots();
+    setStatus(`erased ${slotName(i)}`, 'ok');
+  } catch (e) {
+    setStatus('erase failed: ' + e.message, 'err');
+  }
+});
+
+$('download').addEventListener('click', () => {
+  const bytes = encode();
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([bytes], { type: 'application/octet-stream' }));
+  a.download = slotName(state.slot);
+  a.click();
+  URL.revokeObjectURL(a.href);
+  setStatus(`downloaded ${slotName(state.slot)} — drag it onto the BADGE drive`, 'ok');
+});
+
+function setStatus(msg, cls) {
+  $('status').textContent = msg;
+  $('status').className = cls || '';
+}
+
+drawSlots();
+render();
+</script>
+</body>
+</html>

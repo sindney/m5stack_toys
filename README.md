@@ -11,6 +11,7 @@ A collection of fun projects for M5Stack devices.
 | [m5stocks](./m5stocks/) | Hong Kong stock market monitor | M5Stack Core |
 | [core2_buddy](./core2_buddy/) | WorkBuddy physical task board with TTS voice readout | M5Stack Core2 + M5GO Bottom2 |
 | [rover_bot](./rover_bot/) | Voice-controlled mecanum rover with TOF collision avoidance | M5StickC Plus + RoverC Pro + Unit TOF + Unit ASR |
+| [stopwatch_multiverse](./stopwatch_multiverse/) | Four-app launcher firmware — stopwatch, bubble level, badge slideshow, USB mass-storage drive | M5Stack StopWatch (C152) |
 | [unitv_camera](./unitv_camera/) | Camera streaming from UnitV to M5Stack | UnitV + M5Stack Core |
 
 ## Requirements
@@ -25,6 +26,9 @@ Each project folder contains:
 - Source code (`.ino` for Arduino, `.py` for Python/MaixPy)
 - Build scripts (`.bat` files for Windows)
 - README with detailed instructions
+
+The spec-driven design history for `stopwatch_multiverse` (proposals,
+task lists, capability specs) lives in [openspec/](./openspec/).
 
 ## License
 

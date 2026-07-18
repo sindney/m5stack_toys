@@ -1,0 +1,18 @@
+# Pinned toolchain for stopwatch_multiverse
+#
+# Matches the official StopWatch configuration
+# (espressif32 platform, board = m5stack_stopwatch).
+
+arduino-cli core install esp32:esp32@6.12.0
+
+# FQBN for the StopWatch (ESP32-S3R8 with CO5300 AMOLED + CST820B touch).
+# PSRAM=opi is mandatory — without it the M5GFX power-on block for the
+# CO5300 display is skipped and the AMOLED stays black.
+arduino-cli compile --fqbn "m5stack:esp32:m5stack_stopwatch:UploadSpeed=921600,USBMode=hwcdc,CDCOnBoot=cdc,MSCOnBoot=default,DFUOnBoot=default,UploadMode=default,CPUFreq=240,FlashMode=qio,FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,DebugLevel=none,PSRAM=opi,LoopCore=1,EventsCore=1,EraseFlash=none,JTAGAdapter=default"
+
+# Partition layout: the file is named `partitions.csv` (the hard-coded
+# name in esp32's prebuild recipe) and lives alongside the .ino. It
+# keeps the IDE default app3M_fat9M_16MB layout — app0 @ 0x10000, app1
+# @ 0x310000 — but swaps the FATFS region for a ~10 MB littlefs
+# partition (used by the Badge app to store 466×466 RGB565 images).
+arduino-cli compile --build-property "build.partitions=default_16MB"
